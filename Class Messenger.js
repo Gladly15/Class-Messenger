@@ -1,382 +1,302 @@
-"use strict";
-
-// ==========================================
-// 1. SUPABASE CONNECTION
-// ==========================================
 
 const SUPABASE_URL = "https://eaiuzudogrvvkbowvamb.supabase.co";
 const SUPABASE_KEY = "sb_publishable_oOcAfWULHIxwFXPdfufLUg_mFC5A_42";
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ==========================================
-// 2. HTML ELEMENTS
-// ==========================================
-
+// HTML elements
 const authScreen = document.getElementById("auth-screen");
 const chatScreen = document.getElementById("chat-screen");
 const authForm = document.getElementById("auth-form");
 const authMessage = document.getElementById("auth-message");
-const displayName = document.getElementById("display-name");
+const displayNameInput = document.getElementById("display-name");
 const emailInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
 const signupBtn = document.getElementById("signup-btn");
 const logoutBtn = document.getElementById("logout-btn");
 const who = document.getElementById("who");
-const messageList = document.getElementById("messages");
+const connectionStatus = document.getElementById("connection-status");
+const messagesContainer = document.getElementById("messages");
 const messageForm = document.getElementById("message-form");
 const messageInput = document.getElementById("message-input");
-
-// ==========================================
-// 3. APP STATE
-// ==========================================
+const sendBtn = document.getElementById("send-btn");
 
 let currentUser = null;
-let channel = null;
-let chatGeneration = 0;
+let realtimeChannel = null;
+let sending = false;
 
-const names = Object.create(null);
+// ------------------------------
+// GENERAL HELPERS
+// ------------------------------
 
-function showAuthMessage(text) {
-  authMessage.textContent = text;
-}
-
-// ==========================================
-// 4. SIGN UP
-// ==========================================
-
-async function signUp() {
-  const name = displayName.value.trim();
-  const email = emailInput.value.trim();
-  const password = passwordInput.value;
-
-  if (name.length < 2 || name.length > 24) {
-    showAuthMessage("Display name must be 2 to 24 characters.");
-    return;
-  }
-
-  if (!email || !password) {
-    showAuthMessage("Enter your email and password.");
-    return;
-  }
-
-  showAuthMessage("Creating your account...");
-  signupBtn.disabled = true;
-
-  try {
-    const { data, error } = await sb.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { display_name: name }
-      }
-    });
-
-    if (error) throw error;
-
-    if (data.session) {
-      showAuthMessage("Account created successfully!");
-    } else {
-      showAuthMessage(
-        "Check your email to confirm your account, then log in."
-      );
-    }
-  } catch (error) {
-    showAuthMessage(error.message || "Signup failed.");
-  } finally {
-    signupBtn.disabled = false;
+function setStatus(message) {
+  if (connectionStatus) {
+    connectionStatus.textContent = message;
   }
 }
 
-// ==========================================
-// 5. LOGIN AND LOGOUT
-// ==========================================
-
-async function logIn() {
-  const email = emailInput.value.trim();
-  const password = passwordInput.value;
-
-  if (!email || !password) {
-    showAuthMessage("Enter your email and password.");
-    return;
-  }
-
-  showAuthMessage("Logging in...");
-
-  try {
-    const { error } = await sb.auth.signInWithPassword({
-      email,
-      password
-    });
-
-    if (error) throw error;
-    showAuthMessage("");
-  } catch (error) {
-    showAuthMessage(error.message || "Login failed.");
+function showAuthMessage(message, isError = true) {
+  if (authMessage) {
+    authMessage.textContent = message;
+    authMessage.style.color = isError ? "#dc2626" : "#15803d";
   }
 }
 
-authForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  logIn();
-});
-
-signupBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-
-  if (authForm.reportValidity()) {
-    signUp();
-  }
-});
-
-logoutBtn.addEventListener("click", async () => {
-  logoutBtn.disabled = true;
-
-  try {
-    const { error } = await sb.auth.signOut();
-    if (error) throw error;
-  } catch (error) {
-    console.error("Logout failed:", error);
-    showAuthMessage(error.message || "Could not log out.");
-  } finally {
-    logoutBtn.disabled = false;
-  }
-});
-
-// ==========================================
-// 6. AUTHENTICATION STATE
-// ==========================================
-
-sb.auth.onAuthStateChange((event, session) => {
-  const user = session?.user || null;
-
-  setTimeout(() => {
-    if (user && (!currentUser || currentUser.id !== user.id)) {
-      startChat(user);
-    } else if (!user && currentUser) {
-      stopChat();
-    } else if (!user) {
-      authScreen.hidden = false;
-      chatScreen.hidden = true;
-    }
-  }, 0);
-});
-
-async function restoreSession() {
-  const { data, error } = await sb.auth.getSession();
-
-  if (error) {
-    console.error("Session error:", error);
-    return;
-  }
-
-  if (data.session?.user && !currentUser) {
-    await startChat(data.session.user);
-  }
+function showAuthScreen() {
+  if (authScreen) authScreen.hidden = false;
+  if (chatScreen) chatScreen.hidden = true;
 }
 
-// ==========================================
-// 7. START AND STOP CHAT
-// ==========================================
-
-async function startChat(user) {
-  const generation = ++chatGeneration;
-
-  currentUser = user;
-  authScreen.hidden = true;
-  chatScreen.hidden = false;
-  who.textContent = "Loading...";
-  messageList.replaceChildren();
-
-  try {
-    await loadNames();
-
-    if (generation !== chatGeneration) return;
-
-    who.textContent = await nameFor(user.id);
-
-    if (generation !== chatGeneration) return;
-
-    await loadMessages();
-
-    if (generation !== chatGeneration) return;
-
-    listenForNewMessages();
-    messageInput.focus();
-  } catch (error) {
-    console.error("Could not start chat:", error);
-    who.textContent = "Chat loading failed.";
-  }
+function showChatScreen() {
+  if (authScreen) authScreen.hidden = true;
+  if (chatScreen) chatScreen.hidden = false;
 }
 
-function stopChat() {
-  ++chatGeneration;
-  currentUser = null;
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;"
+    };
 
-  if (channel) {
-    sb.removeChannel(channel);
-    channel = null;
-  }
-
-  messageList.replaceChildren();
-  passwordInput.value = "";
-  who.textContent = "";
-  chatScreen.hidden = true;
-  authScreen.hidden = false;
+    return entities[character];
+  });
 }
 
-// ==========================================
-// 8. PROFILES
-// ==========================================
+function formatTime(dateValue) {
+  if (!dateValue) return "";
 
-async function loadNames() {
-  const { data, error } = await sb
-    .from("profiles")
-    .select("id, display_name");
+  const date = new Date(dateValue);
 
-  if (error) {
-    console.error("Profile loading error:", error);
-    return;
-  }
+  if (Number.isNaN(date.getTime())) return "";
 
-  for (const profile of data || []) {
-    names[profile.id] = profile.display_name || "Unknown";
-  }
+  return date.toLocaleString([], {
+    day: "numeric",
+    month: "short",
+    hour: "numeric",
+    minute: "2-digit"
+  });
 }
 
-async function nameFor(userId) {
-  if (names[userId]) return names[userId];
+// ------------------------------
+// PROFILE / DISPLAY NAME
+// ------------------------------
 
-  const { data, error } = await sb
+async function getProfileName(userId) {
+  if (!userId) return "";
+
+  const { data, error } = await db
     .from("profiles")
     .select("display_name")
     .eq("id", userId)
     .maybeSingle();
 
   if (error) {
-    console.error("Profile lookup error:", error);
+    console.error("Could not load profile:", error.message);
+    return "";
   }
 
-  names[userId] = data?.display_name || "Unknown";
-  return names[userId];
+  return data?.display_name?.trim() || "";
 }
 
-// ==========================================
-// 9. DISPLAY MESSAGES
-// ==========================================
+async function saveProfile(user, preferredName = "") {
+  if (!user) return "";
 
-function showMessage(msg) {
-  if (!currentUser || !msg) return;
+  // Use the saved profile name first so an existing name is not
+  // accidentally replaced with an email address.
+  const existingName = await getProfileName(user.id);
 
+  const name =
+    existingName ||
+    preferredName?.trim() ||
+    user.user_metadata?.display_name?.trim() ||
+    user.email?.split("@")[0] ||
+    "Student";
+
+  const { error } = await db
+    .from("profiles")
+    .upsert(
+      {
+        id: user.id,
+        display_name: name
+      },
+      { onConflict: "id" }
+    );
+
+  if (error) {
+    console.error("Profile save error:", error.message);
+    setStatus("Profile issue: " + error.message);
+  }
+
+  if (who) {
+    who.textContent = name;
+  }
+
+  return name;
+}
+
+// ------------------------------
+// DISPLAY MESSAGES
+// ------------------------------
+
+function renderMessage(message) {
+  if (!messagesContainer || !message) return;
+
+  // Do not display the same database message twice.
   if (
-    messageList.querySelector(
-      '[data-id="' + String(msg.id) + '"]'
+    message.id &&
+    messagesContainer.querySelector(
+      `[data-message-id="${CSS.escape(String(message.id))}"]`
     )
   ) {
     return;
   }
 
-  const item = document.createElement("li");
-  item.className =
-    msg.user_id === currentUser.id ? "message mine" : "message";
+  const article = document.createElement("article");
+  article.className = "message";
 
-  item.dataset.id = String(msg.id);
+  if (message.id) {
+    article.dataset.messageId = String(message.id);
+  }
 
-  const author = document.createElement("span");
-  author.className = "author";
-  author.textContent = names[msg.user_id] || "Unknown";
+  const isMine =
+    Boolean(currentUser) && message.user_id === currentUser.id;
 
-  const body = document.createElement("p");
-  body.textContent = msg.content;
+  article.classList.add(isMine ? "my-message" : "other-message");
 
-  const time = document.createElement("time");
-  const date = new Date(msg.created_at);
+  // Prefer the sender's saved display name.
+  // Never show an email for other classmates as the normal fallback.
+  const senderName =
+    message.profiles?.display_name?.trim() ||
+    message.display_name?.trim() ||
+    (isMine
+      ? currentUser?.user_metadata?.display_name?.trim()
+      : "") ||
+    (isMine ? "You" : "Classmate");
 
-  time.textContent = Number.isNaN(date.getTime())
-    ? ""
-    : date.toLocaleTimeString([], {
-        hour: "numeric",
-        minute: "2-digit"
-      });
+  const header = document.createElement("div");
+  header.className = "message-header";
 
-  item.append(author, body, time);
-  messageList.appendChild(item);
-  messageList.scrollTop = messageList.scrollHeight;
+  const name = document.createElement("strong");
+  name.textContent = senderName;
+
+  const time = document.createElement("small");
+  time.textContent = formatTime(message.created_at);
+
+  const body = document.createElement("div");
+  body.className = "message-content";
+  body.textContent = message.content || "";
+  body.style.whiteSpace = "pre-line";
+
+  header.append(name, time);
+  article.append(header, body);
+
+  messagesContainer.appendChild(article);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// ==========================================
-// 10. LOAD CHAT HISTORY
-// ==========================================
+function renderLocalMessage(sender, content) {
+  if (!messagesContainer) return;
+
+  const article = document.createElement("article");
+  article.className = "message other-message";
+
+  const header = document.createElement("div");
+  header.className = "message-header";
+
+  const name = document.createElement("strong");
+  name.textContent = sender;
+
+  const time = document.createElement("small");
+  time.textContent = new Date().toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+
+  const body = document.createElement("div");
+  body.className = "message-content";
+  body.textContent = content;
+  body.style.whiteSpace = "pre-line";
+
+  header.append(name, time);
+  article.append(header, body);
+
+  messagesContainer.appendChild(article);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+// ------------------------------
+// LOAD CHAT HISTORY
+// ------------------------------
 
 async function loadMessages() {
-  const { data, error } = await sb
+  if (!messagesContainer) return;
+
+  messagesContainer.innerHTML = "";
+
+  const { data: messages, error } = await db
     .from("messages")
     .select("id, user_id, content, created_at")
     .order("created_at", { ascending: true })
     .limit(100);
 
   if (error) {
-    console.error("Message loading error:", error);
-    showBotMessage("Could not load chat history. Check database permissions.");
+    console.error("Load messages error:", error.message);
+    setStatus("Cannot load messages: " + error.message);
     return;
   }
 
-  for (const msg of data || []) {
-    await nameFor(msg.user_id);
-    showMessage(msg);
+  const userIds = [
+    ...new Set(
+      (messages || [])
+        .map((message) => message.user_id)
+        .filter(Boolean)
+    )
+  ];
+
+  const nameMap = {};
+
+  // Retrieve display names for the senders.
+  if (userIds.length > 0) {
+    const { data: profiles, error: profilesError } = await db
+      .from("profiles")
+      .select("id, display_name")
+      .in("id", userIds);
+
+    if (profilesError) {
+      console.error("Load sender names error:", profilesError.message);
+    } else {
+      (profiles || []).forEach((profile) => {
+        nameMap[profile.id] = profile.display_name?.trim() || "";
+      });
+    }
   }
+
+  (messages || []).forEach((message) => {
+    renderMessage({
+      ...message,
+      profiles: {
+        display_name: nameMap[message.user_id] || ""
+      }
+    });
+  });
 }
 
-// ==========================================
-// 11. SEND CHAT MESSAGE
-// ==========================================
+// ------------------------------
+// REALTIME CHAT
+// ------------------------------
 
-messageForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  if (!currentUser) return;
-
-  const content = messageInput.value.trim();
-  if (!content) return;
-
-  if (content.startsWith("/")) {
-    messageInput.value = "";
-    await handleCommand(content);
-    return;
+function subscribeToMessages() {
+  if (realtimeChannel) {
+    db.removeChannel(realtimeChannel);
+    realtimeChannel = null;
   }
 
-  messageInput.value = "";
-
-  const { data, error } = await sb
-    .from("messages")
-    .insert({ content })
-    .select("id, user_id, content, created_at")
-    .single();
-
-  if (error) {
-    console.error("Send message error:", error);
-    alert("Could not send: " + error.message);
-    messageInput.value = content;
-    return;
-  }
-
-  await nameFor(data.user_id);
-  showMessage(data);
-  messageInput.focus();
-});
-
-// ==========================================
-// 12. REALTIME CHAT
-// ==========================================
-
-function listenForNewMessages() {
-  if (channel) {
-    sb.removeChannel(channel);
-    channel = null;
-  }
-
-  channel = sb
-    .channel("class-chat")
+  realtimeChannel = db
+    .channel("class-chat-live-messages")
     .on(
       "postgres_changes",
       {
@@ -385,318 +305,408 @@ function listenForNewMessages() {
         table: "messages"
       },
       async (payload) => {
-        if (!currentUser) return;
+        const message = payload.new;
 
-        await nameFor(payload.new.user_id);
-        showMessage(payload.new);
+        const displayName = await getProfileName(message.user_id);
+
+        renderMessage({
+          ...message,
+          profiles: {
+            display_name: displayName
+          }
+        });
       }
-    )
-    .on(
-      "postgres_changes",
-      {
-        event: "DELETE",
-        schema: "public",
-        table: "messages"
-      },
-      (payload) => removeMessage(payload.old.id)
     )
     .subscribe((status) => {
-      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-        console.error("Realtime connection issue:", status);
-      }
+      console.log("Realtime status:", status);
     });
 }
 
-function removeMessage(id) {
-  const item = messageList.querySelector(
-    '[data-id="' + String(id) + '"]'
-  );
+// ------------------------------
+// SEND CHAT MESSAGE
+// ------------------------------
 
-  if (item) item.remove();
-}
-
-// ==========================================
-// 13. WEATHERBOT API SETTINGS
-// ==========================================
-
-const GEO_URL =
-  "https://geocoding-api.open-meteo.com/v1/search";
-
-const WEATHER_URL =
-  "https://api.open-meteo.com/v1/forecast";
-
-// ==========================================
-// 14. WEATHER DESCRIPTIONS
-// ==========================================
-
-function describeWeather(code) {
-  const conditions = {
-    0: "Clear sky ☀️",
-    1: "Mainly clear 🌤️",
-    2: "Partly cloudy ⛅",
-    3: "Overcast ☁️",
-    45: "Fog 🌫️",
-    48: "Rime fog 🌫️",
-    51: "Light drizzle 🌦️",
-    53: "Moderate drizzle 🌦️",
-    55: "Heavy drizzle 🌧️",
-    56: "Freezing drizzle",
-    57: "Heavy freezing drizzle",
-    61: "Slight rain 🌧️",
-    63: "Moderate rain 🌧️",
-    65: "Heavy rain 🌧️",
-    66: "Light freezing rain",
-    67: "Heavy freezing rain",
-    71: "Slight snow ❄️",
-    73: "Moderate snow ❄️",
-    75: "Heavy snow ❄️",
-    77: "Snow grains ❄️",
-    80: "Slight rain showers 🌦️",
-    81: "Moderate rain showers 🌧️",
-    82: "Heavy rain showers ⛈️",
-    85: "Slight snow showers ❄️",
-    86: "Heavy snow showers ❄️",
-    95: "Thunderstorm ⛈️",
-    96: "Thunderstorm with hail ⛈️",
-    99: "Severe thunderstorm with hail ⛈️"
-  };
-
-  return conditions[code] || "Unknown conditions";
-}
-
-// ==========================================
-// 15. SEARCH ANY SUPPORTED CITY
-// ==========================================
-
-async function findCity(city) {
-  const url =
-    GEO_URL +
-    "?name=" + encodeURIComponent(city) +
-    "&count=10&language=en&format=json";
-
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    throw new Error("Location search failed.");
+async function sendMessage(text) {
+  if (!currentUser) {
+    throw new Error("Please sign in first.");
   }
 
-  const result = await response.json();
-  return result.results || [];
-}
+  const cleanText = text.trim();
 
-// ==========================================
-// 16. GET CURRENT WEATHER + 7-DAY FORECAST
-// ==========================================
+  if (!cleanText) return;
 
-async function getWeather(city) {
-  const places = await findCity(city);
+  const { data, error } = await db
+    .from("messages")
+    .insert({
+      user_id: currentUser.id,
+      content: cleanText
+    })
+    .select("id, user_id, content, created_at")
+    .single();
 
-  if (places.length === 0) {
-    return (
-      "Location not found: " + city +
-      "\nTry another city, such as Manila, Tokyo, or London."
-    );
+  if (error) {
+    console.error("Send message error:", error);
+    throw new Error(error.message);
   }
 
-  const place = places[0];
+  // Display only after Supabase confirms the save.
+  const displayName =
+    (await getProfileName(currentUser.id)) ||
+    currentUser.user_metadata?.display_name ||
+    "You";
 
-  const locationName = [
-    place.name,
-    place.admin1,
-    place.country
-  ].filter(Boolean).join(", ");
-
-  return getWeatherByCoordinates(
-    place.latitude,
-    place.longitude,
-    locationName
-  );
-}
-
-async function getWeatherByCoordinates(
-  latitude,
-  longitude,
-  locationName
-) {
-  const url =
-    WEATHER_URL +
-    "?latitude=" + latitude +
-    "&longitude=" + longitude +
-    "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m" +
-    "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
-    "&forecast_days=7" +
-    "&timezone=auto";
-
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    throw new Error("Weather data could not be loaded.");
-  }
-
-  const result = await response.json();
-  const current = result.current;
-  const daily = result.daily;
-
-  if (!current || !daily) {
-    throw new Error("Weather data is unavailable.");
-  }
-
-  const lines = [
-    "🌍 WEATHER REPORT",
-    "📍 Location: " + locationName,
-    "🕒 Local time: " + current.time,
-    "",
-    "🌡️ CURRENT WEATHER",
-    "Temperature: " + current.temperature_2m + "°C",
-    "Feels like: " + current.apparent_temperature + "°C",
-    "Condition: " + describeWeather(current.weather_code),
-    "Humidity: " + current.relative_humidity_2m + "%",
-    "Precipitation: " + current.precipitation + " mm",
-    "Wind speed: " + current.wind_speed_10m + " km/h",
-    "",
-    "📅 7-DAY FORECAST"
-  ];
-
-  for (let i = 0; i < daily.time.length; i++) {
-    lines.push(
-      daily.time[i] +
-      " | " + describeWeather(daily.weather_code[i]) +
-      " | High: " + daily.temperature_2m_max[i] + "°C" +
-      " | Low: " + daily.temperature_2m_min[i] + "°C" +
-      " | Rain chance: " +
-      (daily.precipitation_probability_max[i] ?? "N/A") + "%"
-    );
-  }
-
-  lines.push("", "Weather data: Open-Meteo");
-
-  return lines.join("\n");
-}
-
-// ==========================================
-// 17. DETECT USER LOCATION WITH PERMISSION
-// ==========================================
-
-async function getMyLocationWeather() {
-  if (!navigator.geolocation) {
-    showBotMessage(
-      "Your browser does not support location detection.\n" +
-      "Try /weather Manila instead."
-    );
-    return;
-  }
-
-  showBotMessage("Requesting location permission...");
-
-  navigator.geolocation.getCurrentPosition(
-    async (position) => {
-      try {
-        const report = await getWeatherByCoordinates(
-          position.coords.latitude,
-          position.coords.longitude,
-          "Your current location"
-        );
-
-        showBotMessage(report);
-      } catch (error) {
-        console.error("Location weather error:", error);
-        showBotMessage("Could not load weather for your location.");
-      }
-    },
-    (error) => {
-      console.error("Location permission error:", error);
-
-      showBotMessage(
-        "Location access was denied or unavailable.\n" +
-        "Allow browser location permission or use /weather Manila."
-      );
-    },
-    {
-      enableHighAccuracy: false,
-      timeout: 15000,
-      maximumAge: 300000
+  renderMessage({
+    ...data,
+    profiles: {
+      display_name: displayName
     }
-  );
+  });
 }
 
-// ==========================================
-// 18. WEATHERBOT COMMAND HANDLER
-// ==========================================
+// ------------------------------
+// WEATHERBOT COMMANDS
+// ------------------------------
 
 async function handleCommand(text) {
-  const parts = text.trim().split(/\s+/);
-  const command = parts[0].toLowerCase();
-  const city = parts.slice(1).join(" ").trim();
+  const command = text.trim();
 
-  if (command !== "/weather") {
-    showBotMessage(
-      "Unknown command.\n" +
-      "Try /weather Manila or /weather here."
+  if (command.toLowerCase() === "/help") {
+    renderLocalMessage(
+      "WeatherBot",
+      "Available command:\n/weather City Name\nExample: /weather Manila"
     );
-    return;
+
+    return true;
   }
 
-  if (!city) {
-    showBotMessage(
-      "🌦️ WEATHERBOT HELP\n\n" +
-      "/weather Manila - Current weather and forecast\n" +
-      "/weather Tokyo - Search another city\n" +
-      "/weather New York - Search a city with spaces\n" +
-      "/weather here - Detect your location with permission"
-    );
-    return;
+  if (command.toLowerCase().startsWith("/weather")) {
+    const city = command.substring("/weather".length).trim();
+
+    if (!city) {
+      renderLocalMessage(
+        "WeatherBot",
+        "Please enter a city name.\nExample: /weather Manila"
+      );
+
+      return true;
+    }
+
+    renderLocalMessage("WeatherBot", `Checking weather for ${city}...`);
+
+    try {
+      const geoResponse = await fetch(
+        "https://geocoding-api.open-meteo.com/v1/search?name=" +
+          encodeURIComponent(city) +
+          "&count=1&language=en&format=json"
+      );
+
+      if (!geoResponse.ok) {
+        throw new Error("Could not contact the weather service.");
+      }
+
+      const geoData = await geoResponse.json();
+      const place = geoData.results?.[0];
+
+      if (!place) {
+        renderLocalMessage(
+          "WeatherBot",
+          `I couldn't find "${city}". Please check the city name.`
+        );
+
+        return true;
+      }
+
+      const weatherURL =
+        "https://api.open-meteo.com/v1/forecast?" +
+        `latitude=${place.latitude}` +
+        `&longitude=${place.longitude}` +
+        "&current=temperature_2m,relative_humidity_2m," +
+        "apparent_temperature,precipitation,weather_code,wind_speed_10m" +
+        "&timezone=auto";
+
+      const weatherResponse = await fetch(weatherURL);
+
+      if (!weatherResponse.ok) {
+        throw new Error("Could not retrieve weather information.");
+      }
+
+      const weatherData = await weatherResponse.json();
+      const weather = weatherData.current;
+
+      const descriptions = {
+        0: "Clear sky",
+        1: "Mainly clear",
+        2: "Partly cloudy",
+        3: "Overcast",
+        45: "Fog",
+        48: "Depositing rime fog",
+        51: "Light drizzle",
+        53: "Moderate drizzle",
+        55: "Dense drizzle",
+        61: "Slight rain",
+        63: "Moderate rain",
+        65: "Heavy rain",
+        71: "Slight snow",
+        73: "Moderate snow",
+        75: "Heavy snow",
+        80: "Rain showers",
+        81: "Moderate rain showers",
+        82: "Heavy rain showers",
+        95: "Thunderstorm",
+        96: "Thunderstorm with hail",
+        99: "Thunderstorm with heavy hail"
+      };
+
+      const description =
+        descriptions[weather.weather_code] || "Weather information available";
+
+      const result =
+        `Weather in ${place.name}${place.country ? ", " + place.country : ""}\n` +
+        `${description}\n` +
+        `Temperature: ${weather.temperature_2m}°C\n` +
+        `Feels like: ${weather.apparent_temperature}°C\n` +
+        `Humidity: ${weather.relative_humidity_2m}%\n` +
+        `Wind: ${weather.wind_speed_10m} km/h\n` +
+        `Precipitation: ${weather.precipitation} mm`;
+
+      renderLocalMessage("WeatherBot", result);
+    } catch (error) {
+      console.error("Weather error:", error);
+
+      renderLocalMessage(
+        "WeatherBot",
+        "Weather lookup failed. Please try again later."
+      );
+    }
+
+    return true;
   }
 
-  if (
-    ["here", "my location", "current location"].includes(
-      city.toLowerCase()
-    )
-  ) {
-    await getMyLocationWeather();
-    return;
-  }
-
-  showBotMessage("Searching weather for " + city + "...");
-
-  try {
-    const report = await getWeather(city);
-    showBotMessage(report);
-  } catch (error) {
-    console.error("WeatherBot error:", error);
-
-    showBotMessage(
-      "Weather service is unavailable right now.\n" +
-      "Check your internet connection and try again."
-    );
-  }
+  return false;
 }
 
-// ==========================================
-// 19. PRIVATE WEATHERBOT REPLY
-// ==========================================
+// ------------------------------
+// SIGN IN / SIGN UP
+// ------------------------------
 
-function showBotMessage(text) {
-  if (!currentUser) return;
+if (authForm) {
+  authForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
 
-  const item = document.createElement("li");
-  item.className = "message bot";
+    const email = emailInput?.value.trim();
+    const password = passwordInput?.value;
+    const displayName = displayNameInput?.value.trim();
 
-  const author = document.createElement("span");
-  author.className = "author";
-  author.textContent = "WeatherBot · Private reply";
+    if (!email || !password) {
+      showAuthMessage("Please enter your email and password.");
+      return;
+    }
 
-  const body = document.createElement("p");
-  body.textContent = text;
-  body.style.whiteSpace = "pre-line";
-  body.style.overflowWrap = "anywhere";
+    const isSignup = signupBtn?.dataset.mode === "signup";
 
-  item.append(author, body);
-  messageList.appendChild(item);
-  messageList.scrollTop = messageList.scrollHeight;
+    showAuthMessage(
+      isSignup ? "Creating account..." : "Signing in...",
+      false
+    );
+
+    try {
+      if (isSignup) {
+        const { data, error } = await db.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              display_name: displayName || email.split("@")[0]
+            }
+          }
+        });
+
+        if (error) throw error;
+
+        if (data.session && data.user) {
+          await startChat(data.user, displayName);
+          showAuthMessage("", false);
+        } else {
+          showAuthMessage(
+            "Account created. Check your email to confirm your account, then sign in.",
+            false
+          );
+        }
+      } else {
+        const { data, error } = await db.auth.signInWithPassword({
+          email,
+          password
+        });
+
+        if (error) throw error;
+
+        await startChat(data.user, displayName);
+        showAuthMessage("", false);
+      }
+    } catch (error) {
+      console.error("Authentication error:", error);
+      showAuthMessage(error.message || "Authentication failed.");
+    }
+  });
 }
 
-// ==========================================
-// 20. RESTORE EXISTING LOGIN
-// ==========================================
+// If your HTML has a button for switching signup mode.
+if (signupBtn) {
+  signupBtn.addEventListener("click", () => {
+    const isSignup = signupBtn.dataset.mode === "signup";
+
+    if (isSignup) {
+      signupBtn.dataset.mode = "signin";
+      signupBtn.textContent = "Switch to Sign In";
+      showAuthMessage("Sign-in mode selected.", false);
+    } else {
+      signupBtn.dataset.mode = "signup";
+      signupBtn.textContent = "Sign Up";
+      showAuthMessage("Sign-up mode selected.", false);
+    }
+  });
+}
+
+// ------------------------------
+// START CHAT
+// ------------------------------
+
+async function startChat(user, preferredName = "") {
+  currentUser = user;
+
+  showChatScreen();
+  setStatus("Loading profile...");
+
+  await saveProfile(user, preferredName);
+
+  setStatus("Loading messages...");
+  await loadMessages();
+
+  subscribeToMessages();
+
+  setStatus("Connected");
+}
+
+// ------------------------------
+// LOG OUT
+// ------------------------------
+
+async function stopChat() {
+  currentUser = null;
+
+  if (realtimeChannel) {
+    await db.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+
+  if (messagesContainer) {
+    messagesContainer.innerHTML = "";
+  }
+
+  if (who) {
+    who.textContent = "";
+  }
+
+  showAuthScreen();
+  setStatus("Signed out");
+}
+
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", async () => {
+    setStatus("Signing out...");
+
+    const { error } = await db.auth.signOut();
+
+    if (error) {
+      setStatus("Logout failed: " + error.message);
+      console.error("Logout error:", error);
+      return;
+    }
+
+    await stopChat();
+  });
+}
+
+// ------------------------------
+// SEND FORM
+// ------------------------------
+
+if (messageForm) {
+  messageForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    if (sending) return;
+
+    const text = messageInput?.value ?? "";
+
+    if (!text.trim()) return;
+
+    sending = true;
+
+    if (sendBtn) {
+      sendBtn.disabled = true;
+    }
+
+    setStatus("Sending message...");
+
+    try {
+      const isCommand = await handleCommand(text);
+
+      if (!isCommand) {
+        await sendMessage(text);
+      }
+
+      // Clear input only after the message is saved or command handled.
+      if (messageInput) {
+        messageInput.value = "";
+      }
+
+      setStatus("Connected");
+    } catch (error) {
+      console.error("Send error:", error);
+
+      setStatus("Message not sent: " + error.message);
+
+      // Keep the typed message if sending fails.
+    } finally {
+      sending = false;
+
+      if (sendBtn) {
+        sendBtn.disabled = false;
+      }
+
+      messageInput?.focus();
+    }
+  });
+}
+
+// ------------------------------
+// RESTORE LOGIN SESSION
+// ------------------------------
+
+async function restoreSession() {
+  const { data, error } = await db.auth.getSession();
+
+  if (error) {
+    console.error("Session error:", error);
+    showAuthScreen();
+    setStatus("Please sign in");
+    return;
+  }
+
+  if (data.session?.user) {
+    await startChat(data.session.user);
+  } else {
+    showAuthScreen();
+    setStatus("Please sign in");
+  }
+}
 
 restoreSession();
+
+// Keep the interface updated when the user signs out elsewhere.
+db.auth.onAuthStateChange((event) => {
+  if (event === "SIGNED_OUT" && currentUser) {
+    stopChat();
+  }
+});
